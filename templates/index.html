@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Driver Drowsiness Detection</title>
+<style>
+  :root { --bg:#0b0b0b; --neon:#00ff99; --muted:#9aa; --card:#111; }
+  *{box-sizing:border-box}
+  body{
+    margin:0; font-family:Inter, Arial, sans-serif;
+    background:var(--bg); color:#fff; display:flex; justify-content:center;
+    padding:16px;
+  }
+  .wrap{ width:100%; max-width:560px; }
+  header{ display:flex; justify-content:space-between; align-items:center; gap:12px; }
+  h1{ margin:0; color:var(--neon); font-size:1.1rem; }
+  .controls{ display:flex; gap:8px; }
+  button{ cursor:pointer; border:0; padding:10px 12px; border-radius:8px; font-weight:600; }
+  .btn-enable{ background:#00a3ff; color:#fff; }
+  .btn-start{ background:#00c067; color:#042; }
+  .btn-stop{ background:#ff4d4f; color:#fff; }
+
+  .video-card{ margin-top:12px; border-radius:12px; overflow:hidden; border:3px solid rgba(0,255,153,0.08); background:#000; }
+  img#videoFeed{ width:100%; height:auto; display:block; background:#000; }
+
+  .status-panel{ margin-top:12px; background:rgba(255,255,255,0.03); padding:12px; border-radius:10px; }
+  .status-title{ color:var(--neon); font-weight:700; font-size:0.9rem; }
+  .status-value{ font-size:1.15rem; margin-top:6px; }
+
+  footer{ margin-top:12px; color:var(--muted); text-align:center; font-size:0.9rem; }
+
+  @media(max-width:480px){
+    header{ flex-direction:column; align-items:flex-start; gap:8px; }
+    .controls{ width:100%; display:flex; flex-direction:column; }
+    button{ width:100%; padding:12px; font-size:16px; }
+  }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Driver Drowsiness Detection</h1>
+      <div class="controls">
+        <button id="enableBtn" class="btn-enable">🔊 Enable Sound</button>
+        <button id="startBtn" class="btn-start">Start Camera</button>
+        <button id="stopBtn" class="btn-stop">Stop Camera</button>
+      </div>
+    </header>
+
+    <div class="video-card">
+      <img id="videoFeed" src="" alt="Live feed">
+    </div>
+
+    <div class="status-panel">
+      <div class="status-title">Live status</div>
+      <div id="statusVal" class="status-value">idle</div>
+
+      <div style="margin-top:10px" class="status-title">Alarm</div>
+      <div id="alarmVal" class="status-value" style="color:#ffb3b3">Off</div>
+
+      <div style="margin-top:10px; color:var(--muted); font-size:0.9rem;">
+        Alarm triggers after <strong>10 seconds</strong> of continuous drowsiness.
+      </div>
+    </div>
+
+    <footer>Make sure <code>/static/alarm.wav</code> exists and you tapped "Enable Sound"</footer>
+  </div>
+
+  <!-- audio element (WAV) -->
+  <audio id="alarmAudio" src="/static/alarm.wav" preload="auto"></audio>
+
+<script>
+  const enableBtn = document.getElementById('enableBtn');
+  const startBtn  = document.getElementById('startBtn');
+  const stopBtn   = document.getElementById('stopBtn');
+  const videoFeed  = document.getElementById('videoFeed');
+  const statusVal  = document.getElementById('statusVal');
+  const alarmVal   = document.getElementById('alarmVal');
+  const alarmAudio = document.getElementById('alarmAudio');
+
+  // ensure loop while alarm is active
+  alarmAudio.loop = true;
+
+  let alarmEnabled = false;
+  let alarmPlaying = false;
+  let pollHandle = null;
+  let lastAlarmState = false; // remembers previous alarm boolean
+
+  // Unlock audio reliably (single user gesture)
+  enableBtn.addEventListener('click', async () => {
+    try {
+      await alarmAudio.play();
+      alarmAudio.pause();
+      alarmAudio.currentTime = 0;
+      alarmEnabled = true;
+      enableBtn.style.display = 'none';
+      alert('Audio enabled — now start the camera.');
+    } catch (e) {
+      console.warn('Audio unlock blocked:', e);
+      alert('Tap again to enable sound (browser blocked it).');
+    }
+  });
+
+  startBtn.addEventListener('click', async () => {
+    if (!alarmEnabled) {
+      alert('Please enable sound first.');
+      return;
+    }
+    try {
+      await fetch('/start_camera', { method: 'POST' });
+      videoFeed.src = '/video_feed';
+      // start polling status
+      if (pollHandle) clearInterval(pollHandle);
+      pollHandle = setInterval(pollStatus, 500);
+      pollStatus(); // immediate check
+    } catch (e) {
+      console.error('start failed', e);
+      alert('Failed to start camera.');
+    }
+  });
+
+  stopBtn.addEventListener('click', async () => {
+    try {
+      await fetch('/stop_camera', { method: 'POST' });
+      videoFeed.src = '';
+      if (pollHandle) { clearInterval(pollHandle); pollHandle = null; }
+      stopAlarm(); // ensure audio stops
+      updateUI('idle', false);
+    } catch (e) {
+      console.error('stop failed', e);
+    }
+  });
+
+  // Poll /get_status and handle alarm playback robustly
+  async function pollStatus(){
+    try {
+      const res = await fetch('/get_status');
+      if (!res.ok) return;
+      const data = await res.json();
+      const prediction = data.prediction || 'idle';
+      const alarm = !!data.alarm;
+
+      updateUI(prediction, alarm);
+
+      // Alarm control logic:
+      // - When alarm toggles from false -> true: start playing (looping)
+      // - While alarm remains true: keep playing (loop)
+      // - When alarm becomes false: stop and reset so it can replay next time
+      if (alarm && !alarmPlaying) {
+        // start playing only if user enabled sound
+        if (alarmEnabled) {
+          try {
+            alarmAudio.currentTime = 0;
+            await alarmAudio.play();
+            alarmPlaying = true;
+          } catch (e) {
+            console.warn('play blocked', e);
+          }
+        }
+      } else if (!alarm && alarmPlaying) {
+        // stop playing and reset so it can play next episode
+        stopAlarm();
+      }
+    } catch (e) {
+      // ignore network errors
+      // console.debug('poll err', e);
+    }
+  }
+
+  function updateUI(prediction, alarm){
+    statusVal.textContent = prediction;
+    alarmVal.textContent = alarm ? 'ON' : 'Off';
+    alarmVal.style.color = alarm ? '#ffd1d1' : '#ffb3b3';
+  }
+
+  function stopAlarm(){
+    try {
+      alarmAudio.pause();
+      alarmAudio.currentTime = 0;
+    } catch (e) {}
+    alarmPlaying = false;
+  }
+
+  // cleanup on page unload
+  window.addEventListener('beforeunload', () => {
+    if (pollHandle) clearInterval(pollHandle);
+    stopAlarm();
+  });
+</script>
+</body>
+</html>
