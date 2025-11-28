@@ -67,7 +67,6 @@
     <footer>Make sure <code>/static/alarm.wav</code> exists and you tapped "Enable Sound"</footer>
   </div>
 
-  <!-- audio element (WAV) -->
   <audio id="alarmAudio" src="/static/alarm.wav" preload="auto"></audio>
 
 <script>
@@ -79,15 +78,13 @@
   const alarmVal   = document.getElementById('alarmVal');
   const alarmAudio = document.getElementById('alarmAudio');
 
-  // ensure loop while alarm is active
   alarmAudio.loop = true;
 
   let alarmEnabled = false;
   let alarmPlaying = false;
   let pollHandle = null;
-  let lastAlarmState = false; // remembers previous alarm boolean
+  let lastAlarmState = false; 
 
-  // Unlock audio reliably (single user gesture)
   enableBtn.addEventListener('click', async () => {
     try {
       await alarmAudio.play();
@@ -132,7 +129,6 @@
     }
   });
 
-  // Poll /get_status and handle alarm playback robustly
   async function pollStatus(){
     try {
       const res = await fetch('/get_status');
@@ -144,11 +140,7 @@
       updateUI(prediction, alarm);
 
       // Alarm control logic:
-      // - When alarm toggles from false -> true: start playing (looping)
-      // - While alarm remains true: keep playing (loop)
-      // - When alarm becomes false: stop and reset so it can replay next time
       if (alarm && !alarmPlaying) {
-        // start playing only if user enabled sound
         if (alarmEnabled) {
           try {
             alarmAudio.currentTime = 0;
@@ -163,8 +155,6 @@
         stopAlarm();
       }
     } catch (e) {
-      // ignore network errors
-      // console.debug('poll err', e);
     }
   }
 
@@ -182,7 +172,6 @@
     alarmPlaying = false;
   }
 
-  // cleanup on page unload
   window.addEventListener('beforeunload', () => {
     if (pollHandle) clearInterval(pollHandle);
     stopAlarm();
