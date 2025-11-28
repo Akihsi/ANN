@@ -7,52 +7,34 @@ import timm
 from ultralytics import YOLO
 from flask import Flask, render_template, Response, jsonify, request
 
-# ----------------------------
-# CONFIG / TUNABLES
-# ----------------------------
 YOLO_MODEL_PATH = "driver.pt"
 VIT_WEIGHTS_PATH = "deit_drowsiness_model.pth"
 VIT_ARCH = "deit_small_patch16_224"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# How often inference runs (seconds). Lower -> more CPU/GPU cost.
 INFERENCE_INTERVAL = 0.25   # ~4 FPS inference
-# How often streaming yields frames (delay between frames)
 STREAM_SLEEP = 0.03         # ~30 FPS output
-# Persistence threshold for alarm (seconds)
-PERSIST_SECONDS = 10.0
+PERSIST_SECONDS = 5.0
 
-# class names mapping (adjust if your checkpoint uses different names)
 VIT_CLASS_NAMES = ["class_0", "class_1", "class_2", "class_3"]
-# treat class_0 and class_2 as drowsy (closed eyes, yawn)
 ALARM_INDICES = {0, 2}
 
-# ----------------------------
-# APP & SHARED STATE
-# ----------------------------
+# APP 
 app = Flask(__name__, template_folder="templates", static_folder="static")
-
-# shared frame / locks
 _latest_frame = None
 _frame_lock = threading.Lock()
 
-# thread control
 _capture_thread = None
 _infer_thread = None
-_running_event = threading.Event()  # when set => threads should run
+_running_event = threading.Event()  
 
-# inference state
 _status_lock = threading.Lock()
 _current_prediction = "idle"
 _persistent_start_ts = None
 _alarm_flag = False
 
-# camera handle
 _camera = None
 
-# ----------------------------
-# Load models once
-# ----------------------------
 print("Loading YOLO model from", YOLO_MODEL_PATH)
 yolo_model = YOLO(YOLO_MODEL_PATH)
 try:
@@ -84,9 +66,6 @@ def preprocess_vit(img_bgr):
     tensor = torch.from_numpy(img).unsqueeze(0).to(DEVICE)
     return tensor
 
-# ----------------------------
-# Threads
-# ----------------------------
 def camera_capture_loop(device_index=0):
     """Continuously read frames from camera and store the latest in _latest_frame."""
     global _camera, _latest_frame
@@ -106,7 +85,6 @@ def camera_capture_loop(device_index=0):
             continue
         with _frame_lock:
             _latest_frame = frame
-    # release when stopped
     try:
         cap.release()
     except Exception:
@@ -126,13 +104,11 @@ def inference_loop(inference_interval=INFERENCE_INTERVAL):
             continue
         last_inf = now
 
-        # copy latest frame
         with _frame_lock:
             frame = None if _latest_frame is None else _latest_frame.copy()
         if frame is None:
             continue
 
-        # run YOLO (Ultralytics accepts numpy BGR frames)
         predicted_label = "no_detection"
         try:
             results = yolo_model(frame, verbose=False)
@@ -142,7 +118,6 @@ def inference_loop(inference_interval=INFERENCE_INTERVAL):
             print("YOLO error:", e)
 
         if boxes is not None and len(boxes) > 0:
-            # pick highest confidence box
             best_xy = None
             best_conf = -1.0
             for b in boxes:
@@ -160,7 +135,6 @@ def inference_loop(inference_interval=INFERENCE_INTERVAL):
                     best_xy = xy
             if best_xy is not None:
                 x1, y1, x2, y2 = best_xy
-                # clamp
                 x1, y1 = max(0, x1), max(0, y1)
                 x2, y2 = min(frame.shape[1] - 1, x2), min(frame.shape[0] - 1, y2)
                 if (x2 - x1) > 10 and (y2 - y1) > 10:
@@ -184,13 +158,10 @@ def inference_loop(inference_interval=INFERENCE_INTERVAL):
         else:
             predicted_label = "no_detection"
 
-        # update shared state and persistent logic
         with _status_lock:
             _current_prediction = predicted_label
-            # persistent drowsiness: if predicted label index is in ALARM_INDICES
             try:
                 idx_guess = None
-                # map to index if matches naming "class_X" or in class list
                 if predicted_label in VIT_CLASS_NAMES:
                     idx_guess = VIT_CLASS_NAMES.index(predicted_label)
                 elif predicted_label.startswith("class_"):
@@ -198,7 +169,6 @@ def inference_loop(inference_interval=INFERENCE_INTERVAL):
                         idx_guess = int(predicted_label.split("_", 1)[1])
                     except Exception:
                         idx_guess = None
-                # check
                 if idx_guess is not None and idx_guess in ALARM_INDICES:
                     if _persistent_start_ts is None:
                         _persistent_start_ts = time.time()
@@ -216,9 +186,6 @@ def inference_loop(inference_interval=INFERENCE_INTERVAL):
 
     print("Inference thread exiting")
 
-# ----------------------------
-# Streaming generator (fast, serves latest frames)
-# ----------------------------
 def stream_generator():
     global _latest_frame
     while _running_event.is_set():
@@ -235,11 +202,8 @@ def stream_generator():
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
         time.sleep(STREAM_SLEEP)
-    # when stopped, generator ends
 
-# ----------------------------
 # Flask routes
-# ----------------------------
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -249,12 +213,9 @@ def start_camera():
     global _capture_thread, _infer_thread, _running_event
     if _running_event.is_set():
         return jsonify({"status": "already_running"})
-    # set running
     _running_event.set()
-    # start camera thread
     _capture_thread = threading.Thread(target=camera_capture_loop, args=(0,), daemon=True)
     _capture_thread.start()
-    # start inference thread
     _infer_thread = threading.Thread(target=inference_loop, daemon=True)
     _infer_thread.start()
     return jsonify({"status": "started"})
@@ -265,8 +226,6 @@ def stop_camera():
     if not _running_event.is_set():
         return jsonify({"status": "not_running"})
     _running_event.clear()
-    # allow threads to exit and release camera
-    # reset shared states
     with _frame_lock:
         _latest_frame = None
     with _status_lock:
@@ -288,9 +247,6 @@ def get_status():
             "alarm": bool(_alarm_flag)
         })
 
-# ----------------------------
 # Run
-# ----------------------------
 if __name__ == '__main__':
-    # run on 0.0.0.0:8000 by default
     app.run(host='0.0.0.0', port=8000, debug=False, threaded=True)
